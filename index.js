@@ -1724,4 +1724,94 @@ client.on("interactionCreate", async interaction => {
 });
 
 // INICIAR BOT
+
+// ==========================================
+// POCOYO STORE - SISTEMA DE SORTEIOS
+// ==========================================
+
+const comandoSortear = new SlashCommandBuilder()
+  .setName("sortear")
+  .setDescription("Realizar um sorteio")
+  .addStringOption(option =>
+    option
+      .setName("participantes")
+      .setDescription("Nomes separados por vírgulas")
+      .setRequired(true)
+  );
+
+// Adiciona o comando à lista já existente
+commands.push(comandoSortear.toJSON());
+
+// Sistema de execução do sorteio
+client.on("interactionCreate", async interaction => {
+  if (
+    !interaction.isChatInputCommand() ||
+    interaction.commandName !== "sortear"
+  ) return;
+
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({
+      content: "❌ Somente a equipe autorizada pode realizar sorteios!",
+      ephemeral: true
+    });
+  }
+
+  const texto = interaction.options.getString("participantes");
+
+  const participantes = texto
+    .split(",")
+    .map(nome => nome.trim())
+    .filter(Boolean);
+
+  if (participantes.length < 2) {
+    return interaction.reply({
+      content: "❌ Informe pelo menos 2 participantes, separados por vírgulas.",
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const canal = await client.channels.fetch("1458922860281335869");
+
+    if (!canal || !canal.isTextBased() || !canal.send) {
+      throw new Error("Canal de sorteios não encontrado.");
+    }
+
+    const vencedor =
+      participantes[Math.floor(Math.random() * participantes.length)];
+
+    const anuncio = new EmbedBuilder()
+      .setColor(0x36B7F4)
+      .setTitle("🎉 SORTEIO FINALIZADO! 🎉")
+      .setDescription(
+        `🏆 **${vencedor}** 🏆\n\n` +
+        "🥳 **PARABÉNS, VOCÊ GANHOU!**\n\n" +
+        "🎁 Entre em contato com a equipe da Pocoyo Store para reivindicar seu prêmio!\n\n" +
+        "💙 Obrigado a todos que participaram!"
+      )
+      .setFooter({
+        text: "Pocoyo Store • Sorteios"
+      })
+      .setTimestamp();
+
+    await canal.send({
+      embeds: [anuncio],
+      allowedMentions: { parse: [] }
+    });
+
+    await interaction.editReply(
+      `✅ Sorteio realizado com sucesso!\n🏆 O resultado foi publicado em <#1458922860281335869>.`
+    );
+
+  } catch (error) {
+    console.error("Erro no sorteio:", error);
+
+    await interaction.editReply(
+      "❌ Não consegui publicar o resultado. Verifique as permissões do canal."
+    );
+  }
+});
+
 client.login(TOKEN);
