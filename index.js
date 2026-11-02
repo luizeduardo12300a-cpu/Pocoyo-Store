@@ -1,3 +1,6 @@
+// POCOYO STORE - Discord.js v14
+// Configure os dados secretos nas variáveis de ambiente da FadeHost.
+// Nunca coloque DISCORD_TOKEN no código.
 const {
   Client, GatewayIntentBits, Partials, PermissionsBitField, ChannelType,
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
@@ -44,7 +47,6 @@ function cartInfo(c) {
   return c.items.map(x => `• ${x.name} × ${x.qty} — ${money(x.price * x.qty)}`).join("\n") +
     `\n\nSubtotal: ${money(t.subtotal)}\nDesconto: ${money(t.discount)}\n**Total: ${money(t.total)}**`;
 }
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
   partials: [Partials.Channel]
@@ -74,11 +76,28 @@ async function privateReply(i, content, extra = {}) {
   return i.reply({ content, ephemeral: true, ...extra });
 }
 async function publishTicketPanel(channel) {
-  const embed = new EmbedBuilder().setColor(0x5865F2).setTitle("🎫 Atendimento | Pocoyo Store")
-    .setDescription("Clique em **CREATE TICKET** para abrir seu canal privado de atendimento.");
+  const embed = new EmbedBuilder()
+    .setColor("#1FA3E6")
+    .setTitle("🎮 POCOYO STORE")
+    .setDescription(
+      "🕒 **Ticket Aberto 24hrs!**\n" +
+      "📦 Olhe o **Estoque de MM2** antes de abrir o ticket.\n\n" +
+      "🎟️ **Ticket ainda é manual pelo momento!**\n\n" +
+      "📢 **AVISOS**\n" +
+      "• Caso for comprar, abra o ticket e espere um atendente atendê-lo!\n" +
+      "• Abra ticket de compra somente para fazer compras!\n\n" +
+      "🔵 **Pocoyo Store — Ticket Compras.**"
+    )
+    .setFooter({ text: "Pocoyo Store • Atendimento" });
+
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("ticket_create").setLabel("CREATE TICKET").setEmoji("🎫").setStyle(ButtonStyle.Success)
+    new ButtonBuilder()
+      .setCustomId("ticket_create")
+      .setLabel("CREATE TICKET")
+      .setEmoji("🎫")
+      .setStyle(ButtonStyle.Success)
   );
+
   return channel.send({ embeds: [embed], components: [row] });
 }
 async function showTicketForm(i) {
@@ -89,12 +108,12 @@ async function showTicketForm(i) {
     ["quantity", "Quantidade", TextInputStyle.Short, true],
     ["notes", "Observações (opcional)", TextInputStyle.Paragraph, false]
   ];
+
   for (const [id, label, style, required] of fields) {
     const input = new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required);
     modal.addComponents(new ActionRowBuilder().addComponents(input));
   }
   await i.showModal(modal);
-
 }
 async function createTicket(i) {
   const existing = Object.values(db.tickets).find(t => t.guildId === i.guildId && t.userId === i.user.id && t.open);
@@ -139,13 +158,13 @@ client.on("messageCreate", async m => {
     catch { await m.reply("Não consegui enviar DM. Ative as mensagens diretas deste servidor e tente novamente."); }
   };
   if (cmd === "help") return replyDM("🛍️ **POCOYO STORE — CLIENTES**\n!help — Ajuda\n!cupom — Listar cupons\n!cupom CÓDIGO — Aplicar cupom\n!calculadora VALOR PERCENTUAL — Calcular desconto\n/catalogo — Catálogo\n/carrinho — Carrinho\n/comprar — Fazer pedido\n/pedido — Consultar pedido");
-  if (cmd === "cupom") {
+
+    if (cmd === "cupom") {
     if (!a[0]) {
       const list = db.coupons.filter(c => c.active).map(c => `• ${c.code} — ${c.type === "percent" ? c.value + "%" : money(c.value)}`);
       return replyDM(list.length ? "🎟️ **Cupons ativos**\n" + list.join("\n") : "Não há cupons ativos.");
     }
-
-      const code = a[0].toUpperCase(), cp = couponByCode(code);
+    const code = a[0].toUpperCase(), cp = couponByCode(code);
     if (!cp) return replyDM("Cupom inválido ou inativo.");
     cart(m.author.id).coupon = code; save(); return replyDM(`✅ Cupom ${code} aplicado ao carrinho.`);
   }
@@ -188,14 +207,14 @@ client.on("interactionCreate", async i => {
       t.open = false; save(); await privateReply(i, "Ticket fechado. O canal será apagado em 5 segundos.");
       setTimeout(() => i.channel?.delete().catch(() => {}), 5000); return;
     }
-    if (i.isModalSubmit() && i.customId === "ticket_form") return createTicket(i);
+
+      if (i.isModalSubmit() && i.customId === "ticket_form") return createTicket(i);
     if (!i.isChatInputCommand()) return;
     const n = i.commandName;
     if (n === "ticketpainel") {
       if (!admin(i.member)) return privateReply(i, "⛔ Somente a equipe pode publicar o painel.");
       await publishTicketPanel(i.channel); return privateReply(i, "Painel de tickets publicado!");
-
-        }
+    }
     if (n === "painel") return privateReply(i, "🛍️ **POCOYO STORE**\nUse /catalogo para ver os produtos. Para atendimento, abra um ticket.", {
       components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("ticket_create").setLabel("CREATE TICKET").setEmoji("🎫").setStyle(ButtonStyle.Success))]
     });
