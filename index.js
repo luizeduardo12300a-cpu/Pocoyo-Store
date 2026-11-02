@@ -1,265 +1,852 @@
-// POCOYO STORE - Discord.js v14
-// Configure os dados secretos nas variáveis de ambiente da FadeHost.
-// Nunca coloque DISCORD_TOKEN no código.
-const {
-  Client, GatewayIntentBits, Partials, PermissionsBitField, ChannelType,
-  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder,
-  REST, Routes
-} = require("discord.js");
-const fs = require("node:fs");
-const path = require("node:path");
+require("dotenv").config();
 
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  PermissionsBitField,
+  ChannelType,
+  SlashCommandBuilder,
+  REST,
+  Routes
+} = require("discord.js");
+
+const fs = require("fs");
+const path = require("path");
+
+// CONFIGURAÇÕES
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const PREFIX = process.env.PREFIX || "!";
-const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || "";
-const TICKET_STAFF_ROLE_ID = process.env.TICKET_STAFF_ROLE_ID || ADMIN_ROLE_ID;
-const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || "";
-const ORDERS_CHANNEL_ID = process.env.ORDERS_CHANNEL_ID || "";
-const FILE = path.join(__dirname, "pocoyo-data.json");
 
-if (!TOKEN || ! CLIENT_ID || !GUILD_ID) {
-  console.error("Configure DISCORD_TOKEN, CLIENT_ID e GUILD_ID na FadeHost.");
-  process.exit(1);
+const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID;
+const TICKET_STAFF_ROLE_ID = process.env.TICKET_STAFF_ROLE_ID;
+const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID;
+const ORDERS_CHANNEL_ID = process.env.ORDERS_CHANNEL_ID;
+
+// BANCO DE DADOS
+const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(DATA_DIR, "store.json");
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
-const blank = { products: [], coupons: [], carts: {}, orders: [], tickets: {} };
-let db = blank;
-try { if (fs.existsSync(FILE)) db = { ...blank, ...JSON.parse(fs.readFileSync(FILE, "utf8")) }; } catch (e) { console.error(e); }
-const save = () => fs.writeFileSync(FILE, JSON.stringify(db, null, 2));
-const money = n => (n / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-const cents = n => Math.round(Number(String(n).replace(",", ".")) * 100);
-const admin = m => !!m && (m.permissions?.has(PermissionsBitField.Flags.Administrator) || (!!ADMIN_ROLE_ID && m.roles?.cache?.has(ADMIN_ROLE_ID)));
-const dm = async (user, text) => { try { await user.send(text); } catch { /* usuário pode bloquear DMs */ } };
-const ephemeral = (i, content) => i.reply({ content, ephemeral: true });
-const cart = id => db.carts[id] || (db.carts[id] = { items: [], coupon: null });
-const couponByCode = code => db.coupons.find(c => c.code === code && c.active);
-function totals(c) {
-  const subtotal = c.items.reduce((s, x) => s + x.price * x.qty, 0);
-  const cp = c.coupon && couponByCode(c.coupon);
-  const discount = cp ? (cp.type === "percent" ? Math.round(subtotal * cp.value / 100) : Math.min(subtotal, cp.value)) : 0;
-  return { subtotal, discount, total: subtotal - discount };
+
+let db = {
+  products: [],
+  orders: [],
+  carts: {},
+  coupons: [],
+  nextProductId: 1,
+  nextOrderId: 1001
+};
+
+if (fs.existsSync(DATA_FILE)) {
+  try {
+    db = {
+      ...db,
+      ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8"))
+    };
+  } catch (error) {
+    console.error("Erro ao carregar banco de dados:", error);
+  }
 }
-function cartInfo(c) {
-  if (!c.items.length) return "Seu carrinho está vazio.";
-  const t = totals(c);
-  return c.items.map(x => `• ${x.name} × ${x.qty} — ${money(x.price * x.qty)}`).join("\n") +
-    `\n\nSubtotal: ${money(t.subtotal)}\nDesconto: ${money(t.discount)}\n**Total: ${money(t.total)}**`;
+
+function saveDB() {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 }
+
+// CLIENTE DISCORD
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
-  partials: [Partials.Channel]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-const slash = [
-  new SlashCommandBuilder().setName("painel").setDescription("Painel da Pocoyo Store"),
-  new SlashCommandBuilder().setName("catalogo").setDescription("Ver produtos"),
-  new SlashCommandBuilder().setName("carrinho").setDescription("Ver carrinho"),
-  new SlashCommandBuilder().setName("comprar").setDescription("Criar pedido"),
-  new SlashCommandBuilder().setName("pedido").setDescription("Consultar pedidos"),
-  new SlashCommandBuilder().setName("ticketpainel").setDescription("Publicar painel de tickets (equipe)"),
-  new SlashCommandBuilder().setName("adicionar").setDescription("Adicionar produto (equipe)")
-    .addStringOption(o => o.setName("nome").setDescription("Nome").setRequired(true))
-    .addNumberOption(o => o.setName("preco").setDescription("Preço em reais").setRequired(true).setMinValue(0.01))
-    .addIntegerOption(o => o.setName("estoque").setDescription("Estoque").setRequired(true).setMinValue(0)),
-  new SlashCommandBuilder().setName("estoque").setDescription("Ver estoque (equipe)"),
-  new SlashCommandBuilder().setName("removerproduto").setDescription("Remover produto (equipe)")
-    .addStringOption(o => o.setName("nome").setDescription("Nome").setRequired(true)),
-  new SlashCommandBuilder().setName("pedidos").setDescription("Listar pedidos (equipe)"),
-  ...["pago", "entregar", "cancelar"].map(n => new SlashCommandBuilder().setName(n).setDescription(`${n} pedido (equipe)`)
-    .addIntegerOption(o => o.setName("id").setDescription("Número do pedido").setRequired(true)))
-].map(x => x.toJSON());
+function isAdmin(member) {
+  if (!member) return false;
 
-async function privateReply(i, content, extra = {}) {
-  if (i.deferred || i.replied) return i.followUp({ content, ephemeral: true, ...extra });
-  return i.reply({ content, ephemeral: true, ...extra });
+  return (
+    member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+    member.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
+    (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID))
+  );
 }
+
+function money(value) {
+  return Number(value || 0).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL"
+  });
+}
+
+function parsePrice(value) {
+  const number = Number(
+    String(value).replace(",", ".").replace(/[^\d.]/g, "")
+  );
+
+  return Number.isFinite(number) ? number : NaN;
+}
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName("painel")
+    .setDescription("Mostra o painel da loja"),
+
+  new SlashCommandBuilder()
+    .setName("catalogo")
+    .setDescription("Mostra os produtos da loja"),
+
+  new SlashCommandBuilder()
+    .setName("carrinho")
+    .setDescription("Mostra seu carrinho"),
+
+  new SlashCommandBuilder()
+    .setName("comprar")
+    .setDescription("Finaliza seu pedido"),
+
+  new SlashCommandBuilder()
+    .setName("pedido")
+    .setDescription("Consulta um pedido")
+    .addIntegerOption(option =>
+      option.setName("id")
+        .setDescription("Número do pedido")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("ticketpainel")
+    .setDescription("Publica o painel de tickets"),
+
+  new SlashCommandBuilder()
+    .setName("adicionar")
+    .setDescription("Adiciona um produto")
+    .addStringOption(option =>
+      option.setName("nome").setDescription("Nome").setRequired(true)
+    )
+    .addNumberOption(option =>
+      option.setName("preco").setDescription("Preço").setRequired(true)
+    )
+    .addIntegerOption(option =>
+      option.setName("estoque").setDescription("Quantidade").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("estoque")
+    .setDescription("Altera o estoque")
+    .addIntegerOption(option =>
+      option.setName("produto").setDescription("ID do produto").setRequired(true)
+    )
+    .addIntegerOption(option =>
+      option.setName("quantidade").setDescription("Nova quantidade").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("removerproduto")
+    .setDescription("Remove um produto")
+    .addIntegerOption(option =>
+      option.setName("produto").setDescription("ID do produto").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("pedidos")
+    .setDescription("Lista os pedidos"),
+
+  new SlashCommandBuilder()
+    .setName("pago")
+    .setDescription("Marca pedido como pago")
+    .addIntegerOption(option =>
+      option.setName("id").setDescription("ID do pedido").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("entregar")
+    .setDescription("Marca pedido como entregue")
+    .addIntegerOption(option =>
+      option.setName("id").setDescription("ID do pedido").setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName("detalhes").setDescription("Detalhes").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("cancelar")
+    .setDescription("Cancela um pedido")
+    .addIntegerOption(option =>
+      option.setName("id").setDescription("ID do pedido").setRequired(true)
+    )
+].map(command => command.toJSON());
+
+async function registerCommands() {
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+  await rest.put(
+    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+    { body: commands }
+  );
+
+  console.log("Comandos registrados!");
+}
+
+async function privateReply(interaction, content) {
+  if (interaction.replied || interaction.deferred) {
+    return interaction.followUp({ content, ephemeral: true });
+  }
+
+  return interaction.reply({ content, ephemeral: true });
+}
+
+// PAINEL AZUL DE TICKETS
 async function publishTicketPanel(channel) {
   const embed = new EmbedBuilder()
-    .setColor("#1FA3E6")
-    .setTitle("🎮 POCOYO STORE")
+    .setColor("#168FE5")
+    .setTitle("💙 POCOYO STORE")
     .setDescription(
-      "🕒 **Ticket Aberto 24hrs!**\n" +
-      "📦 Olhe o **Estoque de MM2** antes de abrir o ticket.\n\n" +
-      "🎟️ **Ticket ainda é manual pelo momento!**\n\n" +
-      "📢 **AVISOS**\n" +
-      "• Caso for comprar, abra o ticket e espere um atendente atendê-lo!\n" +
-      "• Abra ticket de compra somente para fazer compras!\n\n" +
-      "🔵 **Pocoyo Store — Ticket Compras.**"
+      "Seja bem-vindo ao atendimento da **Pocoyo Store**!\n\n" +
+      "🎫 Nosso atendimento funciona **24 horas**.\n\n" +
+      "📦 Antes de abrir um ticket de compra, confira o estoque do **MM2**.\n\n" +
+      "🛒 Abra um ticket somente para assuntos relacionados a compras.\n\n" +
+      "💬 Precisa de ajuda? Escolha a opção de suporte."
     )
-    .setFooter({ text: "Pocoyo Store • Atendimento" });
+    .setFooter({ text: "POCOYO STORE • Atendimento" });
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId("ticket_create")
-      .setLabel("CREATE TICKET")
-      .setEmoji("🎫")
-      .setStyle(ButtonStyle.Success)
+      .setCustomId("ticket_start")
+      .setLabel("ABRIR ATENDIMENTO")
+      .setEmoji("💙")
+      .setStyle(ButtonStyle.Primary)
   );
 
-  return channel.send({ embeds: [embed], components: [row] });
-}
-async function showTicketForm(i) {
-  const modal = new ModalBuilder().setCustomId("ticket_form").setTitle("Solicitar atendimento");
-  const fields = [
-    ["nick", "Seu Nick", TextInputStyle.Short, true],
-    ["items", "Itens desejados", TextInputStyle.Paragraph, true],
-    ["quantity", "Quantidade", TextInputStyle.Short, true],
-    ["notes", "Observações (opcional)", TextInputStyle.Paragraph, false]
-  ];
-
-  for (const [id, label, style, required] of fields) {
-    const input = new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required);
-    modal.addComponents(new ActionRowBuilder().addComponents(input));
-  }
-  await i.showModal(modal);
-}
-async function createTicket(i) {
-  const existing = Object.values(db.tickets).find(t => t.guildId === i.guildId && t.userId === i.user.id && t.open);
-  if (existing) return privateReply(i, `Você já tem um ticket aberto: <#${existing.channelId}>`);
-  const perms = [
-    { id: i.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-    { id: i.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.AttachFiles] }
-  ];
-  if (TICKET_STAFF_ROLE_ID && i.guild.roles.cache.has(TICKET_STAFF_ROLE_ID))
-    perms.push({ id: TICKET_STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
-  const uname = i.user.username.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12) || "cliente";
-  const ch = await i.guild.channels.create({
-    name: `ticket-${uname}`.slice(0, 90), type: ChannelType.GuildText,
-    parent: TICKET_CATEGORY_ID && i.guild.channels.cache.has(TICKET_CATEGORY_ID) ? TICKET_CATEGORY_ID : undefined,
-    permissionOverwrites: perms
+  await channel.send({
+    embeds: [embed],
+    components: [row]
   });
-  db.tickets[ch.id] = { guildId: i.guildId, userId: i.user.id, channelId: ch.id, open: true };
-  save();
-  const e = new EmbedBuilder().setColor(0x5865F2).setTitle("🎫 Novo atendimento")
-    .setDescription(`Cliente: ${i.user}\n**Nick:** ${i.fields.getTextInputValue("nick")}\n**Itens desejados:** ${i.fields.getTextInputValue("items")}\n**Quantidade:** ${i.fields.getTextInputValue("quantity")}\n**Observações:** ${i.fields.getTextInputValue("notes") || "Nenhuma"}`);
-  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("ticket_close").setLabel("FECHAR TICKET").setEmoji("🔒").setStyle(ButtonStyle.Danger));
-  await ch.send({ content: `${i.user}${TICKET_STAFF_ROLE_ID ? ` <@&${TICKET_STAFF_ROLE_ID}>` : ""}`, embeds: [e], components: [row] });
-  return privateReply(i, `✅ Ticket criado: ${ch}`);
 }
 
-client.once("ready", async () => {
-  console.log(`Pocoyo Store conectado como ${client.user.tag}`);
-  try {
-    const rest = new REST({ version: "10" }).setToken(TOKEN);
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: slash });
-    console.log("Comandos slash registrados.");
-  } catch (e) { console.error("Erro registrando slash commands:", e); }
-});
+// ESCOLHA DO TIPO DE ATENDIMENTO
+async function showTicketOptions(interaction) {
+  const embed = new EmbedBuilder()
+    .setColor("#168FE5")
+    .setTitle("💙 ESCOLHA O ATENDIMENTO")
+    .setDescription(
+      "Como podemos ajudar você?\n\n" +
+      "🛒 **COMPRA** — Para realizar uma compra na loja.\n\n" +
+      "🛟 **SUPORTE** — Para tirar dúvidas ou pedir ajuda."
+    );
 
-// Prefix commands respondem por DM; !help mostra somente comandos de clientes.
-client.on("messageCreate", async m => {
-  if (m.author.bot || !m.guild || !m.content.startsWith(PREFIX)) return;
-  const a = m.content.slice(PREFIX.length).trim().split(/\s+/);
-  const cmd = (a.shift() || "").toLowerCase();
-  const replyDM = async text => {
-    try { await m.author.send(text); }
-    catch { await m.reply("Não consegui enviar DM. Ative as mensagens diretas deste servidor e tente novamente."); }
-  };
-  if (cmd === "help") return replyDM("🛍️ **POCOYO STORE — CLIENTES**\n!help — Ajuda\n!cupom — Listar cupons\n!cupom CÓDIGO — Aplicar cupom\n!calculadora VALOR PERCENTUAL — Calcular desconto\n/catalogo — Catálogo\n/carrinho — Carrinho\n/comprar — Fazer pedido\n/pedido — Consultar pedido");
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("ticket_purchase")
+      .setLabel("COMPRA")
+      .setEmoji("🛒")
+      .setStyle(ButtonStyle.Primary),
 
-    if (cmd === "cupom") {
-    if (!a[0]) {
-      const list = db.coupons.filter(c => c.active).map(c => `• ${c.code} — ${c.type === "percent" ? c.value + "%" : money(c.value)}`);
-      return replyDM(list.length ? "🎟️ **Cupons ativos**\n" + list.join("\n") : "Não há cupons ativos.");
-    }
-    const code = a[0].toUpperCase(), cp = couponByCode(code);
-    if (!cp) return replyDM("Cupom inválido ou inativo.");
-    cart(m.author.id).coupon = code; save(); return replyDM(`✅ Cupom ${code} aplicado ao carrinho.`);
+    new ButtonBuilder()
+      .setCustomId("ticket_support")
+      .setLabel("SUPORTE")
+      .setEmoji("🛟")
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  await interaction.reply({
+    embeds: [embed],
+    components: [row],
+    ephemeral: true
+  });
+}
+
+// FORMULÁRIO DE COMPRA
+async function showPurchaseForm(interaction) {
+  const modal = new ModalBuilder()
+    .setCustomId("ticket_purchase_form")
+    .setTitle("🛒 Atendimento de compra");
+
+  const nick = new TextInputBuilder()
+    .setCustomId("nick")
+    .setLabel("Seu nick no Roblox")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const items = new TextInputBuilder()
+    .setCustomId("items")
+    .setLabel("Quais itens deseja comprar?")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true);
+
+  const quantity = new TextInputBuilder()
+    .setCustomId("quantity")
+    .setLabel("Quantidade")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const notes = new TextInputBuilder()
+    .setCustomId("notes")
+    .setLabel("Observações (opcional)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(nick),
+    new ActionRowBuilder().addComponents(items),
+    new ActionRowBuilder().addComponents(quantity),
+    new ActionRowBuilder().addComponents(notes)
+  );
+
+  await interaction.showModal(modal);
+}
+
+// FORMULÁRIO DE SUPORTE
+async function showSupportForm(interaction) {
+  const modal = new ModalBuilder()
+    .setCustomId("ticket_support_form")
+    .setTitle("🛟 Atendimento de suporte");
+
+  const question = new TextInputBuilder()
+    .setCustomId("question")
+    .setLabel("Escreva sua dúvida ou problema")
+    .setPlaceholder("Conte como podemos ajudar...")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(1000);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(question)
+  );
+
+  await interaction.showModal(modal);
+}
+
+// CRIAR CANAL PRIVADO
+async function createTicket(interaction, type, details) {
+  const guild = interaction.guild;
+
+  const existing = guild.channels.cache.find(channel =>
+    channel.type === ChannelType.GuildText &&
+    channel.topic === `ticket-${interaction.user.id}`
+  );
+
+  if (existing) {
+    return privateReply(
+      interaction,
+      `Você já tem um ticket aberto: ${existing}`
+    );
   }
-  if (cmd === "calculadora") {
-    const amount = cents(a[0]), pct = Number(a[1]);
-    if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(pct) || pct < 0 || pct > 100)
-      return replyDM("Use: !calculadora VALOR PERCENTUAL\nExemplo: !calculadora 100 10");
-    return replyDM(`Original: ${money(amount)}\nDesconto: ${pct}%\n**Total: ${money(Math.round(amount * (1 - pct / 100)))}**`);
-  }
-  if (cmd === "cupomadm") {
-    if (!admin(m.member)) return replyDM("⛔ Comando exclusivo da equipe.");
-    const sub = (a.shift() || "").toLowerCase();
-    if (sub === "lista") return replyDM(db.coupons.length ? db.coupons.map(c => `${c.code} — ${c.type === "percent" ? c.value + "%" : money(c.value)} — ${c.active ? "ativo" : "inativo"}`).join("\n") : "Nenhum cupom cadastrado.");
-    if (sub === "remover") {
-      const code = (a[0] || "").toUpperCase(), ix = db.coupons.findIndex(c => c.code === code);
-      if (ix < 0) return replyDM("Cupom não encontrado.");
-      db.coupons.splice(ix, 1); save(); return replyDM(`Cupom ${code} removido.`);
-    }
-    if (sub === "criar") {
-      const code = (a[0] || "").toUpperCase(), type = (a[1] || "").toLowerCase(), value = Number(String(a[2] || "").replace(",", "."));
-      if (!/^[A-Z0-9_-]{3,30}$/.test(code) || !["percentual", "percent", "fixo"].includes(type) || !Number.isFinite(value) || value <= 0)
-        return replyDM("Use: !cupomADM criar NOME percentual VALOR\nOu: !cupomADM criar NOME fixo VALOR");
-      if (db.coupons.some(c => c.code === code)) return replyDM("Esse cupom já existe.");
-      if (type !== "fixo" && value > 100) return replyDM("O percentual máximo é 100.");
-      db.coupons.push({ code, type: type === "fixo" ? "fixed" : "percent", value: type === "fixo" ? cents(value) : value, active: true });
-      save(); return replyDM(`✅ Cupom ${code} criado.`);
-    }
-    return replyDM("!cupomADM criar NOME percentual VALOR\n!cupomADM criar NOME fixo VALOR\n!cupomADM lista\n!cupomADM remover CÓDIGO");
-  }
-});
 
-client.on("interactionCreate", async i => {
-  try {
-    if (i.isButton() && i.customId === "ticket_create") return showTicketForm(i);
-    if (i.isButton() && i.customId === "ticket_close") {
-      const t = db.tickets[i.channelId];
-      const staff = admin(i.member) || (TICKET_STAFF_ROLE_ID && i.member.roles.cache.has(TICKET_STAFF_ROLE_ID));
-      if (!t || !t.open) return privateReply(i, "Este ticket já está fechado.");
-      if (i.user.id !== t.userId && !staff) return privateReply(i, "Você não pode fechar este ticket.");
-      t.open = false; save(); await privateReply(i, "Ticket fechado. O canal será apagado em 5 segundos.");
-      setTimeout(() => i.channel?.delete().catch(() => {}), 5000); return;
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel]
+    },
+    {
+      id: interaction.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ]
     }
+  ];
 
-      if (i.isModalSubmit() && i.customId === "ticket_form") return createTicket(i);
-    if (!i.isChatInputCommand()) return;
-    const n = i.commandName;
-    if (n === "ticketpainel") {
-      if (!admin(i.member)) return privateReply(i, "⛔ Somente a equipe pode publicar o painel.");
-      await publishTicketPanel(i.channel); return privateReply(i, "Painel de tickets publicado!");
-    }
-    if (n === "painel") return privateReply(i, "🛍️ **POCOYO STORE**\nUse /catalogo para ver os produtos. Para atendimento, abra um ticket.", {
-      components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("ticket_create").setLabel("CREATE TICKET").setEmoji("🎫").setStyle(ButtonStyle.Success))]
+  if (TICKET_STAFF_ROLE_ID) {
+    permissionOverwrites.push({
+      id: TICKET_STAFF_ROLE_ID,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ]
     });
-    if (n === "catalogo") {
-      const products = db.products.filter(p => p.stock > 0);
-      return privateReply(i, products.length ? products.map(p => `• **${p.name}** — ${money(p.price)} (estoque ${p.stock})`).join("\n") : "Catálogo vazio.");
-    }
-    if (n === "carrinho") return privateReply(i, cartInfo(cart(i.user.id)));
-    if (n === "comprar") {
-      const c = cart(i.user.id);
-      if (!c.items.length) return privateReply(i, "Carrinho vazio. Abra um ticket para solicitar ajuda.");
-      const t = totals(c), id = db.orders.length ? db.orders[db.orders.length - 1].id + 1 : 1;
-      db.orders.push({ id, userId: i.user.id, items: c.items, total: t.total, status: "Aguardando pagamento" });
-      db.carts[i.user.id] = { items: [], coupon: null }; save();
-      const ch = ORDERS_CHANNEL_ID && i.guild.channels.cache.get(ORDERS_CHANNEL_ID);
-      if (ch) ch.send(`🧾 Pedido #${id} de ${i.user} — ${money(t.total)} — Aguardando pagamento`).catch(() => {});
-      return privateReply(i, `✅ Pedido #${id} criado. Total: ${money(t.total)}.`);
-    }
-    if (n === "pedido") {
-      const mine = db.orders.filter(o => o.userId === i.user.id);
-      return privateReply(i, mine.length ? mine.map(o => `#${o.id} — ${o.status} — ${money(o.total)}`).join("\n") : "Você ainda não tem pedidos.");
-    }
-    const team = ["adicionar", "estoque", "removerproduto", "pedidos", "pago", "entregar", "cancelar"];
-    if (team.includes(n)) {
-      if (!admin(i.member)) return privateReply(i, "⛔ Comando exclusivo da equipe.");
-      if (n === "adicionar") {
-        const p = { name: i.options.getString("nome"), price: cents(i.options.getNumber("preco")), stock: i.options.getInteger("estoque") };
-        db.products.push(p); save(); return privateReply(i, `Produto **${p.name}** adicionado.`);
-      }
-      if (n === "estoque") return privateReply(i, db.products.length ? db.products.map(p => `${p.name}: ${p.stock} unidades — ${money(p.price)}`).join("\n") : "Nenhum produto cadastrado.");
-      if (n === "removerproduto") {
-        const ix = db.products.findIndex(p => p.name.toLowerCase() === i.options.getString("nome").toLowerCase());
-        if (ix < 0) return privateReply(i, "Produto não encontrado.");
-        const p = db.products.splice(ix, 1)[0]; save(); return privateReply(i, `${p.name} removido.`);
-      }
-      if (n === "pedidos") return privateReply(i, db.orders.length ? db.orders.map(o => `#${o.id} — <@${o.userId}> — ${money(o.total)} — ${o.status}`).join("\n") : "Nenhum pedido.");
-      const id = i.options.getInteger("id"), order = db.orders.find(o => o.id === id);
-      if (!order) return privateReply(i, "Pedido não encontrado.");
-      order.status = n === "pago" ? "Pago" : n === "entregar" ? "Entregue" : "Cancelado";
-      save(); return privateReply(i, `Pedido #${id}: ${order.status}.`);
-    }
-  } catch (e) {
-    console.error(e);
-    if (i.isRepliable()) { try { await privateReply(i, "Ocorreu um erro. Confira o Console da FadeHost."); } catch {} }
+  }
+
+  const channel = await guild.channels.create({
+    name: `${type}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
+    type: ChannelType.GuildText,
+    topic: `ticket-${interaction.user.id}`,
+    parent: TICKET_CATEGORY_ID || undefined,
+    permissionOverwrites
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor("#168FE5")
+    .setTitle(type === "compra" ? "🛒 TICKET DE COMPRA" : "🛟 TICKET DE SUPORTE")
+    .setDescription(
+      `Olá ${interaction.user}!\n\n` +
+      `${details}\n\n` +
+      "Nossa equipe vai atender você. Aguarde um membro da equipe."
+    );
+
+  const closeRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("ticket_close")
+      .setLabel("FECHAR TICKET")
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  await channel.send({
+    content: TICKET_STAFF_ROLE_ID
+      ? `<@&${TICKET_STAFF_ROLE_ID}> ${interaction.user}`
+      : `${interaction.user}`,
+    embeds: [embed],
+    components: [closeRow]
+  });
+
+  await privateReply(interaction, `Seu ticket foi criado: ${channel}`);
+}
+
+// QUANDO O BOT INICIAR
+client.once("ready", async () => {
+  console.log(`${client.user.tag} está online!`);
+
+  try {
+    await registerCommands();
+  } catch (error) {
+    console.error("Erro ao registrar comandos:", error);
   }
 });
+
+// COMANDOS POR PREFIXO
+client.on("messageCreate", async message => {
+  if (message.author.bot || !message.guild) return;
+
+  const content = message.content.trim();
+  const args = content.split(/\s+/);
+  const command = args[0].toLowerCase();
+
+  if (command === `${PREFIX}help` || command === `${PREFIX}ajuda`) {
+    return message.author.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#168FE5")
+          .setTitle("💙 POCOYO STORE — AJUDA")
+          .setDescription(
+            "**Comandos dos clientes:**\n\n" +
+            "`!help` — Mostra esta ajuda.\n" +
+            "`!cupom` — Mostra os cupons disponíveis.\n" +
+            "`!calculadora` — Calcula descontos.\n\n" +
+            "**Comandos de loja:**\n" +
+            "`/catalogo` — Ver produtos.\n" +
+            "`/carrinho` — Ver carrinho.\n" +
+            "`/comprar` — Finalizar pedido.\n" +
+            "`/pedido` — Consultar pedido."
+          )
+      ]
+    }).catch(() =>
+      message.reply("Ative suas mensagens privadas para receber a ajuda.")
+    );
+  }
+
+  if (command === `${PREFIX}cupom`) {
+    const coupons = db.coupons.filter(coupon => coupon.active !== false);
+
+    if (!coupons.length) {
+      return message.reply("💙 Não há cupons disponíveis no momento.");
+    }
+
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#168FE5")
+          .setTitle("🎟️ CUPONS DISPONÍVEIS")
+          .setDescription(
+            coupons.map(coupon =>
+              `**${coupon.code}** — ${
+                coupon.type === "percent"
+                  ? `${coupon.value}% de desconto`
+                  : `${money(coupon.value)} de desconto`
+              }`
+            ).join("\n")
+          )
+      ]
+    });
+  }
+
+  if (command === `${PREFIX}calculadora`) {
+    const price = parsePrice(args[1]);
+    const discount = Number(args[2]);
+
+    if (!Number.isFinite(price) || !Number.isFinite(discount) ||
+        price < 0 || discount < 0 || discount > 100) {
+      return message.reply(
+        `Use assim: \`${PREFIX}calculadora 100 20\` para calcular 20% de desconto em R$100.`
+      );
+    }
+
+    const finalPrice = price - (price * discount / 100);
+
+    return message.reply(
+      `💙 Valor original: ${money(price)}\n` +
+      `🎟️ Desconto: ${discount}%\n` +
+      `🛒 Valor final: **${money(finalPrice)}**`
+    );
+  }
+
+  if (command === `${PREFIX}cupomadm`) {
+    if (!isAdmin(message.member)) {
+      return message.reply("❌ Comando exclusivo da equipe.");
+    }
+
+    const action = (args[1] || "").toLowerCase();
+
+    if (action === "lista") {
+      return message.reply(
+        db.coupons.length
+          ? db.coupons.map(c => `${c.code}: ${c.value}${c.type === "percent" ? "%" : " reais"}`).join("\n")
+          : "Nenhum cupom cadastrado."
+      );
+    }
+
+    if (action === "remover") {
+      const code = (args[2] || "").toUpperCase();
+      const before = db.coupons.length;
+      db.coupons = db.coupons.filter(c => c.code !== code);
+      saveDB();
+
+      return message.reply(
+        before === db.coupons.length
+          ? "Cupom não encontrado."
+          : `Cupom ${code} removido!`
+      );
+    }
+
+    if (action === "criar") {
+      const code = (args[2] || "").toUpperCase();
+      const type = (args[3] || "").toLowerCase();
+      const value = Number(args[4]);
+
+      if (!code || !["percentual", "fixo"].includes(type) ||
+          !Number.isFinite(value) || value <= 0 ||
+          (type === "percentual" && value > 100)) {
+        return message.reply(
+          `Use: \`${PREFIX}cupomADM criar CODIGO percentual 20\` ou \`${PREFIX}cupomADM criar CODIGO fixo 5\``
+        );
+      }
+
+      db.coupons = db.coupons.filter(c => c.code !== code);
+      db.coupons.push({
+        code,
+        type: type === "percentual" ? "percent" : "fixed",
+        value,
+        active: true
+      });
+
+      saveDB();
+      return message.reply(`✅ Cupom ${code} criado com sucesso!`);
+    }
+
+    return message.reply(
+      "Use: `!cupomADM criar CODIGO percentual 20`, `!cupomADM lista` ou `!cupomADM remover CODIGO`."
+    );
+  }
+});
+
+// INTERAÇÕES DOS BOTÕES, FORMULÁRIOS E COMANDOS
+client.on("interactionCreate", async interaction => {
+  try {
+    if (interaction.isButton()) {
+      if (interaction.customId === "ticket_start") {
+        return showTicketOptions(interaction);
+      }
+
+      if (interaction.customId === "ticket_purchase") {
+        return showPurchaseForm(interaction);
+      }
+
+      if (interaction.customId === "ticket_support") {
+        return showSupportForm(interaction);
+      }
+
+      if (interaction.customId === "ticket_close") {
+        if (
+          !isAdmin(interaction.member) &&
+          !interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID || "0") &&
+          interaction.channel.topic !== `ticket-${interaction.user.id}`
+        ) {
+          return privateReply(interaction, "Você não pode fechar este ticket.");
+        }
+
+        await privateReply(interaction, "🔒 Ticket será fechado.");
+        return interaction.channel.delete();
+      }
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId === "ticket_purchase_form") {
+        const details =
+          `**Nick Roblox:** ${interaction.fields.getTextInputValue("nick")}\n` +
+          `**Itens:** ${interaction.fields.getTextInputValue("items")}\n` +
+          `**Quantidade:** ${interaction.fields.getTextInputValue("quantity")}\n` +
+          `**Observações:** ${interaction.fields.getTextInputValue("notes") || "Nenhuma"}`;
+
+        return createTicket(interaction, "compra", details);
+      }
+
+      if (interaction.customId === "ticket_support_form") {
+        const details =
+          `**Dúvida ou problema:**\n${interaction.fields.getTextInputValue("question")}`;
+
+        return createTicket(interaction, "suporte", details);
+      }
+          }
+
+      // COMANDOS SLASH
+    if (interaction.isChatInputCommand()) {
+      const name = interaction.commandName;
+
+      // PAINEL DE TICKETS
+      if (name === "ticketpainel") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        await publishTicketPanel(interaction.channel);
+        return privateReply(interaction, "✅ Painel de tickets publicado!");
+      }
+
+      // PAINEL DA LOJA
+      if (name === "painel") {
+        const embed = new EmbedBuilder()
+          .setColor("#168FE5")
+          .setTitle("💙 POCOYO STORE")
+          .setDescription(
+            "Bem-vindo à nossa loja!\n\n" +
+            "📦 Use `/catalogo` para ver os produtos.\n" +
+            "🛒 Use `/carrinho` para consultar seu carrinho.\n" +
+            "🎫 Use o painel de tickets para falar com a equipe."
+          );
+
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+
+      // CATÁLOGO
+      if (name === "catalogo") {
+        if (!db.products.length) {
+          return privateReply(interaction, "📦 Ainda não há produtos cadastrados.");
+        }
+
+        const description = db.products.map(product =>
+          `**${product.id} — ${product.name}**\n` +
+          `Preço: ${money(product.price)} | Estoque: ${product.stock}`
+        ).join("\n\n");
+
+        const embed = new EmbedBuilder()
+          .setColor("#168FE5")
+          .setTitle("🛍️ CATÁLOGO POCOYO STORE")
+          .setDescription(description);
+
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+
+      // CARRINHO
+      if (name === "carrinho") {
+        const cart = db.carts[interaction.user.id] || [];
+
+        if (!cart.length) {
+          return privateReply(interaction, "🛒 Seu carrinho está vazio.");
+        }
+
+        return privateReply(interaction, "Seu carrinho:\n" + cart.map(item =>
+          `${item.name} — ${money(item.price)}`
+        ).join("\n"));
+      }
+
+      // COMPRAR
+      if (name === "comprar") {
+        const cart = db.carts[interaction.user.id] || [];
+
+        if (!cart.length) {
+          return privateReply(
+            interaction,
+            "🛒 Seu carrinho está vazio. Entre em contato com a equipe pelo ticket de compra."
+          );
+        }
+
+        const total = cart.reduce((sum, item) => sum + item.price, 0);
+        const order = {
+          id: db.nextOrderId++,
+          userId: interaction.user.id,
+          items: cart,
+          total,
+          status: "Aguardando pagamento"
+        };
+
+        db.orders.push(order);
+        db.carts[interaction.user.id] = [];
+        saveDB();
+
+        return privateReply(
+          interaction,
+          `✅ Pedido #${order.id} criado!\nTotal: ${money(total)}\nPagamento será combinado manualmente com a equipe.`
+        );
+      }
+
+      // CONSULTAR PEDIDO
+      if (name === "pedido") {
+        const id = interaction.options.getInteger("id");
+        const order = db.orders.find(item => item.id === id);
+
+        if (!order || (order.userId !== interaction.user.id && !isAdmin(interaction.member))) {
+          return privateReply(interaction, "❌ Pedido não encontrado.");
+        }
+
+        return privateReply(
+          interaction,
+          `📦 Pedido #${order.id}\nStatus: ${order.status}\nTotal: ${money(order.total)}`
+        );
+      }
+
+      // ADICIONAR PRODUTO
+      if (name === "adicionar") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        const product = {
+          id: db.nextProductId++,
+          name: interaction.options.getString("nome"),
+          price: interaction.options.getNumber("preco"),
+          stock: interaction.options.getInteger("estoque")
+        };
+
+        if (product.price < 0 || product.stock < 0) {
+          return privateReply(interaction, "❌ Preço e estoque não podem ser negativos.");
+        }
+
+        db.products.push(product);
+        saveDB();
+
+        return privateReply(interaction, `✅ Produto ${product.name} adicionado! ID: ${product.id}`);
+      }
+
+      // ALTERAR ESTOQUE
+      if (name === "estoque") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        const id = interaction.options.getInteger("produto");
+        const quantity = interaction.options.getInteger("quantidade");
+        const product = db.products.find(item => item.id === id);
+
+        if (!product) return privateReply(interaction, "❌ Produto não encontrado.");
+        if (quantity < 0) return privateReply(interaction, "❌ Estoque inválido.");
+
+        product.stock = quantity;
+        saveDB();
+
+        return privateReply(interaction, `✅ Estoque de ${product.name} atualizado para ${quantity}.`);
+      }
+
+      // REMOVER PRODUTO
+      if (name === "removerproduto") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        const id = interaction.options.getInteger("produto");
+        const before = db.products.length;
+        db.products = db.products.filter(item => item.id !== id);
+        saveDB();
+
+        return privateReply(
+          interaction,
+          before === db.products.length ? "❌ Produto não encontrado." : "✅ Produto removido!"
+        );
+      }
+
+      // LISTAR PEDIDOS
+      if (name === "pedidos") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        if (!db.orders.length) return privateReply(interaction, "Nenhum pedido cadastrado.");
+
+        return privateReply(interaction, db.orders.map(order =>
+          `#${order.id} — ${order.status} — ${money(order.total)}`
+        ).join("\n"));
+      }
+
+      // MARCAR COMO PAGO
+      if (name === "pago") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        const id = interaction.options.getInteger("id");
+        const order = db.orders.find(item => item.id === id);
+
+        if (!order) return privateReply(interaction, "❌ Pedido não encontrado.");
+
+        order.status = "Pago";
+        saveDB();
+
+        return privateReply(interaction, `✅ Pedido #${id} marcado como pago.`);
+      }
+
+      // ENTREGAR PEDIDO
+      if (name === "entregar") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        const id = interaction.options.getInteger("id");
+        const details = interaction.options.getString("detalhes");
+        const order = db.orders.find(item => item.id === id);
+
+        if (!order) return privateReply(interaction, "❌ Pedido não encontrado.");
+
+        order.status = "Entregue";
+        order.deliveryDetails = details;
+        saveDB();
+
+        return privateReply(interaction, `✅ Pedido #${id} marcado como entregue.`);
+      }
+
+      // CANCELAR PEDIDO
+      if (name === "cancelar") {
+        if (!isAdmin(interaction.member)) {
+          return privateReply(interaction, "❌ Comando exclusivo da equipe.");
+        }
+
+        const id = interaction.options.getInteger("id");
+        const order = db.orders.find(item => item.id === id);
+
+        if (!order) return privateReply(interaction, "❌ Pedido não encontrado.");
+
+        order.status = "Cancelado";
+        saveDB();
+
+        return privateReply(interaction, `✅ Pedido #${id} cancelado.`);
+      }
+    }
+  } catch (error) {
+    console.error("Erro na interação:", error);
+
+    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "❌ Ocorreu um erro. Tente novamente.",
+        ephemeral: true
+      }).catch(() => {});
+    }
+  }
+});
+
+// INICIAR BOT
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("Configure DISCORD_TOKEN, CLIENT_ID e GUILD_ID no FadeHost.");
+  process.exit(1);
+}
 
 client.login(TOKEN);
