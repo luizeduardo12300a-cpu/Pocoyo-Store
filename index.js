@@ -163,7 +163,7 @@ const commands = [
   new SlashCommandBuilder().setName("cancelar").setDescription("Cancela pedido (equipe)")
     .addIntegerOption(o => o.setName("id").setDescription("ID do pedido").setRequired(true)),
 
-  new SlashCommandBuilder().setName("cupomADM").setDescription("Cria ou altera um cupom (equipe)")
+  new SlashCommandBuilder().setName('cupomadm').setDescription("Cria ou altera um cupom (equipe)")
     .addStringOption(o => o.setName("nome").setDescription("Nome do cupom").setRequired(true))
     .addNumberOption(o => o.setName("porcentagem").setDescription("Desconto em %").setRequired(true)),
   new SlashCommandBuilder().setName("ticketpainel").setDescription("Publica o painel de tickets"),
